@@ -4,7 +4,12 @@
 
 Zero-instrumentation cron monitoring for Cloudflare Workers. No changes to your existing Workers, no external services, no paid plan. Paste one file, add one read-only API token, get Telegram alerts when any cron trigger in your account silently stops running or fails.
 
-<!-- screenshot: alert + recovery messages side by side -->
+![Missed-schedule alert](alert.jpg)
+
+
+
+
+![Recovery message](recovery.jpg)
 
 ## The problem
 
