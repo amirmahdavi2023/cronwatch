@@ -1,5 +1,5 @@
 // ============================================================================
-// CronWatch v1.0.2
+// CronWatch v1.0.3
 // Zero-instrumentation cron monitoring for Cloudflare Workers.
 //
 // Cloudflare won't tell you when your cron dies. This single-file Worker will —
@@ -275,6 +275,7 @@ async function runCheck(env) {
     }
   }
 
+  state.lastCheckAt = now;
   await dispatch(env, alerts);
   await saveState(env, state);
   return { ok: true, watched: Object.keys(state.crons).length, alertsSent: alerts.length };
@@ -320,8 +321,13 @@ async function statusJson(env) {
     };
   }
   return {
-    cronwatch: "v1.0.2",
+    cronwatch: "v1.0.3",
     checkedAt: new Date(now).toISOString(),
+    lastCheckAt: state.lastCheckAt
+      ? new Date(state.lastCheckAt).toISOString()
+      : null,
+    note: "State updates only when a check runs (every 5 min). " +
+      "Per-cron numbers reflect the world as of lastCheckAt, not this page load.",
     config: { bufferSeconds, minRuns },
     apiFailures: state.apiFailures || 0,
     watching: out,
@@ -358,7 +364,7 @@ export default {
       }
       if (url.pathname === "/status") return json(await statusJson(env));
       return new Response(
-        "CronWatch v1.0.2 — endpoints: /status, /test, /run",
+        "CronWatch v1.0.3 — endpoints: /status, /test, /run",
         { headers: { "Content-Type": "text/plain; charset=utf-8" } },
       );
     } catch (e) {
