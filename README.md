@@ -106,8 +106,12 @@ dashboard from a phone. If I can ship it from a phone, you can
 install it from anywhere.
 
 ---
-MIT License
----
 
 If CronWatch saved you from a silently dead cron, a ⭐ helps other
 Cloudflare developers find it.
+
+---
+MIT License
+---
+
+
