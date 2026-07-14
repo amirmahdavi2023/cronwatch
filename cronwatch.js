@@ -1,5 +1,5 @@
 // ============================================================================
-// CronWatch v1.0.3
+// CronWatch v0.2.0
 // Zero-instrumentation cron monitoring for Cloudflare Workers.
 //
 // Cloudflare won't tell you when your cron dies. This single-file Worker will —
@@ -21,25 +21,29 @@
 // 2. Workers & Pages -> Create Worker -> name: cronwatch -> paste this file.
 //
 // 3. Worker -> Settings -> Bindings -> Add -> KV Namespace:
-//      Variable name: CRONWATCH_KV      Namespace: CRONWATCH
+//      Variable name: CRONWATCH_KV   Namespace: CRONWATCH
 //
 // 4. Worker -> Settings -> Variables and Secrets:
-//      CF_API_TOKEN   (Secret)  API token with ONLY "Account Analytics: Read"
-//      CF_ACCOUNT_ID  (Text)    your account ID
-//      TG_BOT_TOKEN   (Secret)  Telegram bot token from @BotFather
-//      TG_CHAT_ID     (Text)    your chat id (send a msg to your bot, then
-//                               open api.telegram.org/bot<TOKEN>/getUpdates)
+//      CF_API_TOKEN  (Secret)  API token with ONLY "Account Analytics: Read"
+//      CF_ACCOUNT_ID (Text)    your account ID
+//      TG_BOT_TOKEN  (Secret)  Telegram bot token from @BotFather
+//      TG_CHAT_ID    (Text)    your chat id (send a msg to your bot, then
+//                              open api.telegram.org/bot<TOKEN>/getUpdates)
 //    Optional overrides:
-//      BUFFER_SECONDS      default 180  (ingest delay + safety margin;
-//                                        auto-scales to 5% of the interval
-//                                        for infrequent crons)
-//      MIN_RUNS            default 3    (grace: runs required before arming)
-//      WINDOW_HOURS        default 6    (analytics lookback per check)
+//      BUFFER_SECONDS  default 180  (ingest delay + safety margin;
+//                                    auto-scales to 5% of the interval
+//                                    for infrequent crons)
+//      MIN_RUNS        default 3    (grace: runs required before arming)
+//      WINDOW_HOURS    default 6    (analytics lookback per check)
+//      WATCH           comma-separated script names to watch (default: all)
+//      EXCLUDE         comma-separated script names to ignore
+//      WORKER_NAME     this worker's own script name if you didn't call it
+//                      "cronwatch" (it always excludes itself)
 //
 // 5. Worker -> Settings -> Triggers -> Add Cron Trigger:  */5 * * * *
 //
-// 6. Open  https://<worker-url>/test   -> you should get a Telegram message.
-//    Open  https://<worker-url>/run    -> first check, then /status.
+// 6. Open https://<worker-url>/test  -> you should get a Telegram message.
+//    Open https://<worker-url>/run   -> first check, then /status.
 //
 // Note on WINDOW_HOURS: it does NOT need to exceed your longest cron
 // interval. Checks run every 5 minutes, so every invocation lands inside
@@ -49,19 +53,31 @@
 
 const GQL = "https://api.cloudflare.com/client/v4/graphql";
 const STATE_KEY = "cronwatch:state";
-const PRUNE_AFTER_DAYS = 7; // floor; actual prune = max(this, 3x interval)
-const DIGEST_THRESHOLD = 3; // >N alerts in one check -> single digest message
+const PRUNE_AFTER_DAYS = 7;   // floor; actual prune = max(this, 3x interval)
+const DIGEST_THRESHOLD = 3;   // >N alerts in one check -> single digest message
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
 function cfg(env) {
+  const self = (env.WORKER_NAME || "cronwatch").trim();
+  const exclude = (env.EXCLUDE || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  if (!exclude.includes(self)) exclude.push(self);
   return {
     bufferSeconds: parseInt(env.BUFFER_SECONDS || "180", 10),
     minRuns: parseInt(env.MIN_RUNS || "3", 10),
     windowHours: parseInt(env.WINDOW_HOURS || "6", 10),
+    watch: (env.WATCH || "").split(",").map((s) => s.trim()).filter(Boolean),
+    exclude,
   };
+}
+
+function isWatched(scriptName, conf) {
+  if (conf.exclude.includes(scriptName)) return false;
+  if (conf.watch.length && !conf.watch.includes(scriptName)) return false;
+  return true;
 }
 
 function median(arr) {
@@ -129,22 +145,22 @@ async function saveState(env, state) {
 async function fetchScheduledRuns(env, windowHours) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000).toISOString();
   const query = `
-    query($account: String!, $since: String!) {
-      viewer {
-        accounts(filter: { accountTag: $account }) {
-          workersInvocationsScheduled(
-            limit: 1000,
-            filter: { datetime_geq: $since }
-          ) {
-            scriptName
-            cron
-            datetime
-            scheduledDatetime
-            status
-          }
-        }
+query($account: String!, $since: String!) {
+  viewer {
+    accounts(filter: { accountTag: $account }) {
+      workersInvocationsScheduled(
+        limit: 1000,
+        filter: { datetime_geq: $since }
+      ) {
+        scriptName
+        cron
+        datetime
+        scheduledDatetime
+        status
       }
-    }`;
+    }
+  }
+}`;
   const res = await gql(env, query, { account: env.CF_ACCOUNT_ID, since });
   if (res.errors) throw new Error("GraphQL: " + JSON.stringify(res.errors));
   return res.data?.viewer?.accounts?.[0]?.workersInvocationsScheduled ?? [];
@@ -155,7 +171,8 @@ async function fetchScheduledRuns(env, windowHours) {
 // ---------------------------------------------------------------------------
 
 async function runCheck(env) {
-  const { bufferSeconds, minRuns, windowHours } = cfg(env);
+  const conf = cfg(env);
+  const { bufferSeconds, minRuns, windowHours } = conf;
   const now = Date.now();
   const state = await loadState(env);
   const alerts = [];
@@ -176,15 +193,11 @@ async function runCheck(env) {
     await saveState(env, state);
     return { ok: false, error: String(e) };
   }
+
   if (state.apiFailures >= 3) {
     alerts.push("✅ CronWatch: connection to Cloudflare Analytics restored.");
   }
   state.apiFailures = 0;
-
-  // drop any state left over from the __unknown__ transitional label
-  for (const key of Object.keys(state.crons)) {
-    if (key.startsWith("__unknown__")) delete state.crons[key];
-  }
 
   // group rows by (scriptName, cron)
   // Skip "__unknown__": Analytics uses it for freshly created Workers until
@@ -194,6 +207,7 @@ async function runCheck(env) {
   const groups = {};
   for (const r of rows) {
     if (r.scriptName === "__unknown__") continue;
+    if (!isWatched(r.scriptName, conf)) continue;
     const key = r.scriptName + " ⏰ " + r.cron;
     (groups[key] ??= []).push(r);
   }
@@ -220,6 +234,7 @@ async function runCheck(env) {
     if (newTimes.length) {
       const prevLastSeen = st.lastSeen;
       st.lastSeen = newTimes[newTimes.length - 1];
+
       // recovery?
       if (st.alerted) {
         const med = median(st.samples);
@@ -252,7 +267,15 @@ async function runCheck(env) {
 
   // missed-run detection over ALL known crons (including ones absent from window)
   for (const [key, st] of Object.entries(state.crons)) {
+    // config may have changed since this cron entered state: honor it
+    const script = key.split(" ⏰ ")[0];
+    if (!isWatched(script, conf)) {
+      delete state.crons[key];
+      continue;
+    }
+
     const med = median(st.samples);
+
     // prune long-gone crons (deleted workers) — never before ~3 intervals
     const pruneMs = Math.max(
       PRUNE_AFTER_DAYS * 86400 * 1000,
@@ -262,9 +285,12 @@ async function runCheck(env) {
       delete state.crons[key];
       continue;
     }
+
     if (st.runCount < minRuns || st.samples.length < 2 || !med) continue; // grace
+
     const sinceLast = Math.round((now - st.lastSeen) / 1000);
     const buf = effectiveBuffer(bufferSeconds, med);
+
     if (!st.alerted && sinceLast > med + buf) {
       st.alerted = true;
       st.alertedAt = now;
@@ -297,7 +323,8 @@ async function dispatch(env, alerts) {
 // ---------------------------------------------------------------------------
 
 async function statusJson(env) {
-  const { bufferSeconds, minRuns } = cfg(env);
+  const conf = cfg(env);
+  const { bufferSeconds, minRuns } = conf;
   const state = await loadState(env);
   const now = Date.now();
   const out = {};
@@ -320,15 +347,19 @@ async function statusJson(env) {
         : null,
     };
   }
+
   return {
-    cronwatch: "v1.0.3",
+    cronwatch: "v0.1.0",
     checkedAt: new Date(now).toISOString(),
     lastCheckAt: state.lastCheckAt
       ? new Date(state.lastCheckAt).toISOString()
       : null,
     note: "State updates only when a check runs (every 5 min). " +
       "Per-cron numbers reflect the world as of lastCheckAt, not this page load.",
-    config: { bufferSeconds, minRuns },
+    config: {
+      bufferSeconds, minRuns,
+      watch: conf.watch, exclude: conf.exclude,
+    },
     apiFailures: state.apiFailures || 0,
     watching: out,
   };
@@ -350,6 +381,7 @@ export default {
         status,
         headers: { "Content-Type": "application/json; charset=utf-8" },
       });
+
     try {
       if (url.pathname === "/test") {
         const ok = await sendTelegram(
@@ -364,7 +396,7 @@ export default {
       }
       if (url.pathname === "/status") return json(await statusJson(env));
       return new Response(
-        "CronWatch v1.0.3 — endpoints: /status, /test, /run",
+        "CronWatch v0.1.0 — endpoints: /status, /test, /run",
         { headers: { "Content-Type": "text/plain; charset=utf-8" } },
       );
     } catch (e) {
