@@ -89,6 +89,18 @@ You need: a Cloudflare account (free is fine) and a Telegram account.
 
 For every `(worker, cron expression)` pair seen in Analytics, CronWatch keeps the last 20 gaps between *scheduled* run times and takes the median. If `now − last run > median + buffer`, you get a 🔴 alert — once. When the cron runs again, you get a ✅ with the estimated downtime. Runs with a non-`success` status trigger a ⚠️ failure alert. That's the whole trick: Cloudflare already has the data; it just never looks at it for you.
 
+## Known Issues
+
+**Occasional false "missed schedule" alerts for short-interval crons (< 5 min).**
+Cloudflare's Analytics dataset can lag by several minutes during ingestion,
+which makes a healthy cron briefly look overdue. If you see alert/recovery
+pairs a few minutes apart, this is why — your cron is fine.
+
+Workaround: set `BUFFER_SECONDS` to `420` in the Worker's variables.
+
+A permanent fix (requiring two consecutive missed checks before alerting)
+is coming in v1.1.0.
+
 ## License
 
 MIT
