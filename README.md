@@ -1,110 +1,113 @@
-# CronWatch ⏰🔴
+# CronWatch
 
-**Cloudflare won't tell you when your cron dies. This single-file Worker will.**
+**Cloudflare won't tell you when your cron dies. CronWatch will.**
 
-Zero-instrumentation cron monitoring for Cloudflare Workers. No changes to your existing Workers, no external services, no paid plan. Paste one file, add one read-only API token, get Telegram alerts when any cron trigger in your account silently stops running or fails.
+A single-file Cloudflare Worker that monitors every cron trigger in your
+account and sends you a Telegram alert when one goes silent — and a
+recovery message when it comes back.
 
-![Missed-schedule alert](alert.jpg)
+**Zero instrumentation.** No code changes, no ping URLs, no SDK. Your
+existing Workers don't know CronWatch exists. It reads Cloudflare's own
+Analytics data with a read-only API token.
 
+![CronWatch Telegram alerts](screenshot.jpg)
 
+## Why
 
+Cloudflare cron triggers fail silently. A Worker can stop running —
+deleted trigger, quota issue, broken deploy — and you find out days
+later when the damage is done. Existing solutions (healthchecks.io,
+Cronitor, etc.) require adding a ping call to every job. CronWatch
+requires touching nothing.
 
-![Recovery message](recovery.jpg)
+## How it works
 
-## The problem
+Every 5 minutes, CronWatch queries the official
+`workersInvocationsScheduled` Analytics dataset — the same data behind
+your dashboard's metrics. It learns each cron's normal interval from
+its scheduled run times (median of the last 20 intervals, so one
+outlier never skews it). When a cron is late beyond its learned
+interval plus a safety buffer, you get a 🔴 alert. When it runs again,
+you get a ✅ recovery message with the downtime. Failed runs (non-success
+status) get a ⚠️ alert too.
 
-Cron Triggers on Cloudflare Workers fail silently. If a scheduled Worker stops running — a platform incident, a bad deploy, a quota issue — Cloudflare sends no email, no webhook, nothing. The dashboard only shows the last 100 events, minutes late, and only if you remember to look. If your nightly backup died two weeks ago, you find out the day you need the backup.
+It runs entirely on the Cloudflare free plan.
 
-Existing monitors (Healthchecks.io, Cronitor, etc.) solve this by making you add a ping call inside every job. That means touching every Worker, and shipping your uptime data to a third party.
+## Setup (~10 minutes, dashboard only — no CLI needed)
 
-## How CronWatch is different
+### 1. Create the API token
+My Profile → API Tokens → Create Token → Custom token:
+- Permission: **Account · Account Analytics · Read** — and nothing else.
 
-CronWatch reads Cloudflare's own Analytics (the `workersInvocationsScheduled` GraphQL dataset — cron runs only) from **inside your own account**:
+This token can only read analytics. It cannot touch your Workers,
+DNS, or anything else. That's the whole point.
 
-- **Zero instrumentation** — your existing Workers are never modified. Not one line.
-- **Zero config per cron** — it discovers every cron trigger in the account and learns each one's normal interval from observed history (median-based, robust to outliers).
-- **Self-hosted, free** — runs as one Worker + one KV namespace on the free plan. Your data never leaves your account. The only external call is the alert to Telegram.
-- **Alerts that behave** — one alert per incident (no spam), a ✅ recovery message with downtime estimate, a digest when many things break at once, and a warning if CronWatch itself loses access to Analytics ("monitoring is blind").
+### 2. Create a Telegram bot
+- Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
+- Send your new bot any message, then open
+  `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy your
+  `chat.id`.
 
-Detection latency: typically **5–10 minutes** after a missed schedule (Analytics ingest is ~1 minute; CronWatch checks every 5).
+### 3. Create the Worker
+- Storage & Databases → KV → Create namespace → name: `CRONWATCH`
+- Workers & Pages → Create Worker → name: `cronwatch` → paste
+  [`cronwatch.js`](./cronwatch.js) → Deploy
+- Settings → Bindings → KV Namespace:
+  variable `CRONWATCH_KV` → namespace `CRONWATCH`
+- Settings → Variables and Secrets:
 
-## Setup (~10 minutes, dashboard only — no CLI)
-
-You need: a Cloudflare account (free is fine) and a Telegram account.
-
-**1. Telegram bot**
-- Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the **bot token**.
-- Open your new bot, send it any message (this authorizes it to message you).
-- Get your **chat id**: open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and find `"chat":{"id":...}` — or just ask [@userinfobot](https://t.me/userinfobot).
-
-**2. API token**
-- Cloudflare dashboard → My Profile → API Tokens → Create Token → **Create Custom Token**.
-- One permission only: **Account → Account Analytics → Read**. Copy the token.
-
-**3. KV namespace**
-- Storage & Databases → KV → Create namespace → name it `CRONWATCH`.
-
-**4. The Worker**
-- Workers & Pages → Create Worker → name `cronwatch` → Deploy → Edit code → replace everything with [`cronwatch.js`](./cronwatch.js) → Deploy.
-- Settings → **Bindings** → Add → KV Namespace → variable name exactly `CRONWATCH_KV` → select the `CRONWATCH` namespace.
-- Settings → **Variables and Secrets**:
-
-| Name | Value | Type |
+| Name | Type | Value |
 |---|---|---|
-| `CF_API_TOKEN` | token from step 2 | Secret |
-| `CF_ACCOUNT_ID` | dashboard → Workers & Pages → Account details | Text |
-| `TG_BOT_TOKEN` | token from step 1 | Secret |
-| `TG_CHAT_ID` | your chat id | Text |
+| `CF_API_TOKEN` | Secret | the token from step 1 |
+| `CF_ACCOUNT_ID` | Text | Workers & Pages → overview, right sidebar |
+| `TG_BOT_TOKEN` | Secret | from BotFather |
+| `TG_CHAT_ID` | Text | from getUpdates |
 
-- Settings → **Triggers** → Add Cron Trigger → `*/5 * * * *`.
+- Settings → Triggers → Add Cron Trigger: `*/5 * * * *`
 
-**5. Verify**
-- Open `https://<your-worker-url>/test` → you should receive a Telegram message.
-- Open `/run` (first check), then `/status` → your crons appear with their learned intervals.
+### 4. Verify
+Open `https://<your-worker>.workers.dev/test` — you should get a
+Telegram message. Then `/run` to force a first check, and `/status`
+to see what it's watching.
 
-## Endpoints
+## Configuration (all optional)
 
-| Path | What it does |
-|---|---|
-| `/status` | JSON: everything being watched, learned intervals, time until alert |
-| `/test` | Sends a test Telegram message |
-| `/run` | Runs a check immediately (useful right after install) |
-
-## Optional configuration (env vars)
-
-| Var | Default | Meaning |
+| Variable | Default | What it does |
 |---|---|---|
-| `BUFFER_SECONDS` | `180` | Safety margin over the learned interval before alerting. Auto-scales to 5% of the interval for infrequent crons, so a daily job isn't flagged for being 3 minutes late. |
-| `MIN_RUNS` | `3` | Grace: runs observed before a cron is armed. Prevents false alarms on brand-new crons. |
-| `WINDOW_HOURS` | `6` | Analytics lookback per check. Does **not** need to exceed your longest cron interval — state persists in KV and checks run every 5 minutes, so every run lands in many overlapping windows. |
+| `WATCH` | *(all)* | comma-separated script names to watch |
+| `EXCLUDE` | *(none)* | comma-separated script names to ignore |
+| `WORKER_NAME` | `cronwatch` | **script name only** (not the URL). Set this if you named the Worker something else, so it doesn't monitor itself |
+| `BUFFER_SECONDS` | `180` | grace on top of the learned interval. Auto-scales to 5% of the interval for infrequent crons, so a daily job isn't flagged for being 3 minutes late |
+| `MIN_RUNS` | `3` | runs required before alerting is armed for a cron |
+| `WINDOW_HOURS` | `6` | Analytics lookback per check. Does **not** need to exceed your longest cron interval — state persists in KV |
 
-## Good to know
+## FAQ
 
-- **New Workers take a while to get a name in Analytics** (observed: up to ~3 hours — they show as `__unknown__` until then). The grace period keeps CronWatch quiet during this; a brand-new cron is armed after its first few runs.
-- **Infrequent crons arm slowly by design**: a daily cron needs ~3 days of history before monitoring starts. That's the price of zero configuration.
-- **Very high-volume accounts**: the Analytics query is capped at 1000 rows per check. Normal accounts never get close; if you run thousands of cron invocations per 6 hours, open an issue — pagination is on the roadmap.
-- **Cost**: ~288 checks/day = one GraphQL query + one KV read/write each. Comfortably inside the free plan for both Workers and KV, and under 1% of the Analytics API rate limit.
+**Will it false-alarm?** Analytics data lags ~1–2 minutes behind
+reality; the default 180s buffer absorbs that. Each cron alerts once
+per outage (no spam every 5 minutes), and if many alerts fire at once
+they're batched into a single digest message. If CronWatch can't reach
+the Analytics API, it never fabricates a "missed schedule" alert — it
+tells you monitoring is blind instead.
 
-## How the detection works (short version)
+**New Worker not showing up?** Analytics reports freshly created
+Workers under `__unknown__` for up to a few hours until the name
+resolves. CronWatch skips these and picks the Worker up cleanly once
+the real name appears.
 
-For every `(worker, cron expression)` pair seen in Analytics, CronWatch keeps the last 20 gaps between *scheduled* run times and takes the median. If `now − last run > median + buffer`, you get a 🔴 alert — once. When the cron runs again, you get a ✅ with the estimated downtime. Runs with a non-`success` status trigger a ⚠️ failure alert. That's the whole trick: Cloudflare already has the data; it just never looks at it for you.
+**What about a cron that's supposed to run once a week?** Supported.
+The learned-interval model doesn't care about the cron expression —
+it learns from actual cadence. It just needs `MIN_RUNS` runs first.
 
-## Known Issues
+## Built entirely on an Android phone
 
-**Occasional false "missed schedule" alerts for short-interval crons (< 5 min).**
-Cloudflare's Analytics dataset can lag by several minutes during ingestion,
-which makes a healthy cron briefly look overdue. If you see alert/recovery
-pairs a few minutes apart, this is why — your cron is fine.
-
-Workaround: set `BUFFER_SECONDS` to `420` in the Worker's variables.
-
-A permanent fix (requiring two consecutive missed checks before alerting)
-is coming in v1.1.0.
-
-## License
-
-MIT
+No laptop, no CLI. Written and deployed through the Cloudflare
+dashboard from a phone. If I can ship it from a phone, you can
+install it from anywhere.
 
 ---
+MIT License
+---
 
-*Built entirely from an Android phone using the Cloudflare dashboard. If CronWatch caught a dead cron for you, a ⭐ helps others find it.*
+If CronWatch saved you from a silently dead cron, a ⭐ helps other
+Cloudflare developers find it.
