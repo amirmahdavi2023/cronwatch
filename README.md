@@ -111,7 +111,6 @@ If CronWatch saved you from a silently dead cron, a ⭐ helps other
 Cloudflare developers find it.
 
 ---
-MIT License
----
 
 
+MIT — see [LICENSE](./LICENSE)
